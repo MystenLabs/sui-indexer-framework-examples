@@ -1,0 +1,3 @@
+# Rust build directory
+**/target
+.pre-commit*
