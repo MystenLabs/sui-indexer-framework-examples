@@ -11,7 +11,6 @@ use move_core_types::language_storage::StructTag;
 use sui_indexer_alt_framework::pipeline::{concurrent::Handler, Processor};
 use sui_indexer_alt_framework::postgres;
 use sui_indexer_alt_framework::types::base_types::{ObjectID, SequenceNumber};
-use sui_indexer_alt_framework::types::dynamic_field::Field;
 use sui_indexer_alt_framework::types::effects::TransactionEffectsAPI;
 use sui_indexer_alt_framework::types::full_checkpoint_content::CheckpointData;
 use sui_indexer_alt_framework::types::object::{Object, Owner};
@@ -21,7 +20,7 @@ use sui_indexer_alt_framework::Result;
 
 use crate::schema::walrus_blob;
 use crate::storage::StoredWalrusBlob;
-use crate::types::{Blob, BlobAttribute, DynamicFieldName};
+use crate::types::{extract_file_path_and_parent_id, Blob};
 
 // ============================================================================
 // PROCESSING TYPES
@@ -68,7 +67,9 @@ impl Processor for WalrusBlobPipeline {
 
             // We only care to emit a record for `Metadata` dynamic fields if they have the "path"
             // key-value attribute.
-            let Some((file_path, parent_id)) = self.extract_file_path_and_parent_id(object) else {
+            let Some((file_path, parent_id)) =
+                extract_file_path_and_parent_id(&self.metadata_type, object)
+            else {
                 continue;
             };
 
@@ -106,7 +107,9 @@ impl Processor for WalrusBlobPipeline {
 
             // We only care to emit a record for `Metadata` dynamic fields if they have the "path"
             // key-value attribute.
-            let Some((file_path, parent_id)) = self.extract_file_path_and_parent_id(object) else {
+            let Some((file_path, parent_id)) =
+                extract_file_path_and_parent_id(&self.metadata_type, object)
+            else {
                 continue;
             };
 
@@ -202,48 +205,6 @@ impl WalrusBlobPipeline {
     pub fn new(type_string: &str) -> Result<Self> {
         let metadata_type = parse_sui_struct_tag(type_string)?;
         Ok(WalrusBlobPipeline { metadata_type })
-    }
-
-    /// Try to deserialize the object as a Walrus Metadata dynamic field, and return the
-    /// deserialized data and the parent object ID, or return None if it is not.
-    pub fn get_metadata(
-        &self,
-        object: &Object,
-    ) -> anyhow::Result<Option<(BlobAttribute, ObjectID)>> {
-        // Must be a MoveObject
-        let Some(type_) = object.type_() else {
-            return Ok(None);
-        };
-
-        // Dynamic fields must have an ObjectOwner
-        let Owner::ObjectOwner(parent_id) = object.owner() else {
-            return Ok(None);
-        };
-
-        // The expected type of the dynamic field is a `Field<DynamicFieldName, BlobAttribute>`.
-        if !type_.is(&self.metadata_type) {
-            return Ok(None);
-        }
-
-        let move_object = object
-            .data
-            .try_as_move()
-            .ok_or_else(|| anyhow::anyhow!("Not a Move object"))?;
-
-        // This is called during `process`, so the indexing framework can trace the error
-        let field: Field<DynamicFieldName, BlobAttribute> =
-            bcs::from_bytes(move_object.contents()).context("Failed to deserialize")?;
-
-        Ok(Some((field.value, (*parent_id).into())))
-    }
-
-    /// Extract the file path from the object if it is a walrus metadata dynamic field, otherwise
-    /// return None.
-    pub fn extract_file_path_and_parent_id(&self, object: &Object) -> Option<(String, ObjectID)> {
-        let (metadata, parent_id) = self.get_metadata(object).ok()??;
-        let file_path = metadata.metadata.get(&"path".to_owned())?.to_string();
-
-        Some((file_path, parent_id))
     }
 }
 
