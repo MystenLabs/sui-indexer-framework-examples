@@ -34,7 +34,8 @@ WHERE deleted = TRUE;
 
 -- This table tracks historical changes to relevant Metadata dynamic fields. Unlike the main table,
 -- the historical table is keyed on dynamic_field_id and df_version to capture the full history of
--- object changes.
+-- object changes. If the nullable columns are null, then the record is a tombstone record
+-- indicating that the file_path to blob_id mapping has been deleted by the user.
 CREATE TABLE IF NOT EXISTS walrus_blob_historical (
     -- ID of the Metadata dynamic field of key-value attributes on the Blob object
     dynamic_field_id            BYTEA         NOT NULL,

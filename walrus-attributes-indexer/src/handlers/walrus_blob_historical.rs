@@ -1,3 +1,6 @@
+// Copyright (c) Mysten Labs, Inc.
+// SPDX-License-Identifier: Apache-2.0
+
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -124,7 +127,8 @@ impl Processor for WalrusBlobHistoricalPipeline {
                         continue;
                     };
 
-                    // Only Metadata dynamic fields that have the "path" key-value attribute are indexed.
+                    // Only Metadata dynamic fields that have the "path" key-value attribute are
+                    // indexed, and only those entries need a tombstone record.
                     let Some((_, _)) =
                         extract_file_path_and_parent_id(&self.metadata_type, input_object)
                     else {
@@ -133,7 +137,8 @@ impl Processor for WalrusBlobHistoricalPipeline {
 
                     let lamport = tx.effects.lamport_version();
 
-                    // Unlike the upsert scenario, we do not need to consult the parent object, as those fields can remain empty.
+                    // Unlike the upsert scenario, we do not need to consult the parent object, as
+                    // those fields are to remain empty for tombstone records.
                     values.push(ProcessedWalrusHistoricalMetadata {
                         cp_sequence_number: checkpoint.checkpoint_summary.sequence_number as i64,
                         update: ProcessedWalrusHistoricalUpdate::Delete((c.id, lamport)),

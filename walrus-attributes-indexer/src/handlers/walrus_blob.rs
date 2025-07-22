@@ -1,3 +1,6 @@
+// Copyright (c) Mysten Labs, Inc.
+// SPDX-License-Identifier: Apache-2.0
+
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;

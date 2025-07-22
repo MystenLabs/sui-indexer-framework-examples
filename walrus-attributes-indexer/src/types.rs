@@ -1,3 +1,6 @@
+// Copyright (c) Mysten Labs, Inc.
+// SPDX-License-Identifier: Apache-2.0
+
 use anyhow::{self, Context};
 use move_core_types::language_storage::StructTag;
 use serde::{Deserialize, Serialize};
