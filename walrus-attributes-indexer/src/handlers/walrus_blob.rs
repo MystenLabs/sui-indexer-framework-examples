@@ -29,13 +29,14 @@ use crate::types::{Blob, BlobAttribute, DynamicFieldName};
 // These types represent intermediate data structures used during processing.
 // They bridge between the raw on-chain data and the database storage format.
 
-/// The data of interest from processing a checkpoint, consisting of the Sui Blob object and
+/// Struct representing the data of interest transformed from processing the checkpoint to be passed
+/// to the committer implementation.
 pub struct ProcessedWalrusMetadata {
-    /// The Blob parent object that owns the Metadata dynamic field. TODO holds important content
+    /// The Blob parent object that owns the Metadata dynamic field.
     parent_object: Object,
-    /// The ID of the Metadata dynamic field. mainly for reference
+    /// The ID of the Metadata dynamic field.
     dynamic_field_id: ObjectID,
-    /// TODO
+    /// The user-provided file path to be associated with the blob.
     file_path: String,
     /// The checkpoint sequence number this update occurred in.
     cp_sequence_number: i64,
@@ -65,14 +66,18 @@ impl Processor for WalrusBlobPipeline {
                 continue;
             }
 
-            // We only care to emit a record for `Metadata` dynamic fields with the key-value
-            // attribute of interest.
+            // We only care to emit a record for `Metadata` dynamic fields if they have the "path"
+            // key-value attribute.
             let Some((file_path, parent_id)) = self.extract_file_path_and_parent_id(object) else {
                 continue;
             };
 
-            // The parent object must also exist at least as the input into the checkpoint. We can
-            // consult the input state to determine the correct record to update on the main table.
+            // The parent object must also exist at least as the input into the checkpoint. We need
+            // to consult the input state of the parent object to determine the address_owner and
+            // file_path to correctly update the existing entry on the table into a sentinel row.
+            // Because we are not tracking object mutations, there should not be any interim
+            // mutations to the objects, so it is correct for us to look at the input state into the
+            // checkpoint.
             let Some(parent_object) = checkpoint_input_objects.get(&parent_id) else {
                 tracing::error!("Parent object {} not found among input objects", parent_id);
                 continue;
@@ -99,6 +104,8 @@ impl Processor for WalrusBlobPipeline {
                 continue;
             }
 
+            // We only care to emit a record for `Metadata` dynamic fields if they have the "path"
+            // key-value attribute.
             let Some((file_path, parent_id)) = self.extract_file_path_and_parent_id(object) else {
                 continue;
             };
@@ -134,15 +141,12 @@ impl Handler for WalrusBlobPipeline {
         values: &[Self::Value],
         conn: &mut postgres::Connection<'a>,
     ) -> Result<usize> {
-        let stored_values: Vec<StoredWalrusBlob> = values
+        let stored_values = values
             .into_iter()
             .map(|v| v.try_into())
             .collect::<Result<Vec<StoredWalrusBlob>>>()?;
 
-        let mut total_affected = 0;
-
-        // Handle all upserts and deletes for the main table
-        total_affected += diesel::insert_into(walrus_blob::table)
+        Ok(diesel::insert_into(walrus_blob::table)
             .values(&stored_values)
             .on_conflict((walrus_blob::address_owner, walrus_blob::file_path))
             .do_update()
@@ -157,9 +161,7 @@ impl Handler for WalrusBlobPipeline {
             ))
             .filter(walrus_blob::cp_sequence_number.lt(excluded(walrus_blob::cp_sequence_number)))
             .execute(conn)
-            .await?;
-
-        Ok(total_affected)
+            .await?)
     }
 }
 

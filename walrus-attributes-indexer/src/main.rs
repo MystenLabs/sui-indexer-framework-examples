@@ -5,7 +5,10 @@ use sui_indexer_alt_framework::{
     Result,
 };
 use url::Url;
-use walrus_attributes_indexer::{handlers::WalrusBlobPipeline, MIGRATIONS};
+use walrus_attributes_indexer::{
+    handlers::{WalrusBlobHistoricalPipeline, WalrusBlobPipeline},
+    MIGRATIONS,
+};
 
 #[derive(clap::Parser, Debug)]
 struct Args {
@@ -30,9 +33,16 @@ async fn main() -> Result<()> {
     // is passed to the service, rather than hardcoded here.
     let walrus_blob_pipeline = WalrusBlobPipeline::new(
             "0x2::dynamic_field::Field<vector<u8>, 0xfdc88f7d7cf30afab2f82e8380d11ee8f70efb90e863d1de8616fae1bb09ea77::metadata::Metadata>").unwrap();
+    let walrus_blob_historical_pipeline = WalrusBlobHistoricalPipeline::new(
+        "0x2::dynamic_field::Field<vector<u8>, 0xfdc88f7d7cf30afab2f82e8380d11ee8f70efb90e863d1de8616fae1bb09ea77::metadata::Metadata>",
+    )
+    .unwrap();
 
     indexer
         .concurrent_pipeline(walrus_blob_pipeline, ConcurrentConfig::default())
+        .await?;
+    indexer
+        .concurrent_pipeline(walrus_blob_historical_pipeline, ConcurrentConfig::default())
         .await?;
 
     let _ = indexer.run().await?.await;
