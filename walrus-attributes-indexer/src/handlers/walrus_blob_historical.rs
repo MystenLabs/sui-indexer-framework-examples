@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use anyhow::{self, bail};
+use diesel::ExpressionMethods;
 use diesel_async::RunQueryDsl;
 use move_core_types::language_storage::StructTag;
 use sui_indexer_alt_framework::pipeline::{concurrent::Handler, Processor};
@@ -167,6 +168,20 @@ impl Handler for WalrusBlobHistoricalPipeline {
         Ok(diesel::insert_into(walrus_blob_historical::table)
             .values(&stored_values)
             .on_conflict_do_nothing()
+            .execute(conn)
+            .await?)
+    }
+
+    async fn prune<'a>(
+        &self,
+        from: u64,
+        to_exclusive: u64,
+        conn: &mut postgres::Connection<'a>,
+    ) -> Result<usize> {
+        Ok(diesel::delete(walrus_blob_historical::table)
+            .filter(walrus_blob_historical::blob_id.is_null())
+            .filter(walrus_blob_historical::cp_sequence_number.ge(from as i64))
+            .filter(walrus_blob_historical::cp_sequence_number.lt(to_exclusive as i64))
             .execute(conn)
             .await?)
     }

@@ -169,6 +169,20 @@ impl Handler for WalrusBlobPipeline {
             .execute(conn)
             .await?)
     }
+
+    async fn prune<'a>(
+        &self,
+        from: u64,
+        to_exclusive: u64,
+        conn: &mut postgres::Connection<'a>,
+    ) -> Result<usize> {
+        Ok(diesel::delete(walrus_blob::table)
+            .filter(walrus_blob::deleted.eq(true))
+            .filter(walrus_blob::cp_sequence_number.ge(from as i64))
+            .filter(walrus_blob::cp_sequence_number.lt(to_exclusive as i64))
+            .execute(conn)
+            .await?)
+    }
 }
 
 impl FieldCount for ProcessedWalrusMetadata {
