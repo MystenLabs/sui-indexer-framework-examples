@@ -14,8 +14,6 @@ CREATE TABLE IF NOT EXISTS walrus_blob (
     dynamic_field_id            BYTEA         NOT NULL,
     -- Checkpoint sequence number that produced the state of the dynamic field
     cp_sequence_number          BIGINT        NOT NULL,
-    -- Version of the Metadata dynamic field
-    df_version                  BIGINT        NOT NULL,
     -- Sentinel value to indicate whether the record is a tombstone
     deleted                     BOOLEAN       DEFAULT FALSE,
     PRIMARY KEY (address_owner, file_path)

@@ -8,7 +8,6 @@ diesel::table! {
         owner_id -> Bytea,
         dynamic_field_id -> Bytea,
         cp_sequence_number -> Int8,
-        df_version -> Int8,
         deleted -> Nullable<Bool>,
     }
 }

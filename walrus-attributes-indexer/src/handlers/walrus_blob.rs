@@ -8,118 +8,20 @@ use diesel::query_dsl::methods::FilterDsl;
 use diesel::upsert::excluded;
 use diesel_async::RunQueryDsl;
 use move_core_types::language_storage::StructTag;
-use serde::{Deserialize, Serialize};
 use sui_indexer_alt_framework::pipeline::{concurrent::Handler, Processor};
 use sui_indexer_alt_framework::postgres;
 use sui_indexer_alt_framework::types::base_types::{ObjectID, SequenceNumber};
-use sui_indexer_alt_framework::types::collection_types::VecMap;
 use sui_indexer_alt_framework::types::dynamic_field::Field;
 use sui_indexer_alt_framework::types::effects::TransactionEffectsAPI;
 use sui_indexer_alt_framework::types::full_checkpoint_content::CheckpointData;
-use sui_indexer_alt_framework::types::id::UID;
 use sui_indexer_alt_framework::types::object::{Object, Owner};
 use sui_indexer_alt_framework::types::parse_sui_struct_tag;
 use sui_indexer_alt_framework::FieldCount;
 use sui_indexer_alt_framework::Result;
 
-use crate::schema::{walrus_blob, walrus_blob_historical};
-
-// ============================================================================
-// WALRUS BLOB DESERIALIZATION TYPES
-// ============================================================================
-// These types represent the structure of Walrus blob data as it exists on-chain.
-// They are used for deserializing Move objects into Rust structs.
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct Blob {
-    id: UID,
-    registered_epoch: u32,
-    blob_id: BlobId,
-    size: u64,
-    encoding_type: u8,
-    // Stores the epoch first certified.
-    certified_epoch: Option<u32>,
-    storage: StorageResource,
-    // Marks if this blob can be deleted.
-    deletable: bool,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct StorageResource {
-    id: UID,
-    start_epoch: u32,
-    end_epoch: u32,
-    storage_size: u64,
-}
-
-/// The ID of a blob.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Hash)]
-#[repr(transparent)]
-pub struct BlobId(pub [u8; 32]);
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct DynamicFieldName(Vec<u8>);
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct BlobAttribute {
-    metadata: VecMap<String, String>,
-}
-
-// ============================================================================
-// DATABASE STORAGE TYPES
-// ============================================================================
-// These types represent the structure of data as it's stored in the database.
-// They map directly to database tables and include Diesel annotations.
-
-/// Representation of a row from the `walrus_blob` table, which maps file paths to their latest
-/// dynamic field metadata.
-#[derive(Insertable, Debug, FieldCount, Clone)]
-#[diesel(table_name = walrus_blob)]
-pub struct StoredWalrusBlob {
-    /// The ID of the address that owns the Blob object.
-    address_owner: Vec<u8>,
-    /// The file path of the Blob object that owns the Metadata dynamic field.
-    file_path: String,
-    /// The Blob ID to be used to fetch the Walrus blob. This can be selected in postgres with:
-    ///
-    /// SELECT replace(replace(rtrim(encode(blob_id, 'base64'), '='), '+', '-'), '/', '_') as
-    /// blob_id FROM walrus_blob;
-    blob_id: Vec<u8>,
-    /// The ID of the owner of the Blob object that owns the Metadata dynamic field.
-    owner_id: Vec<u8>,
-    /// The ID of the Metadata dynamic field.
-    dynamic_field_id: Vec<u8>,
-    /// The version of the Metadata dynamic field.
-    /// The checkpoint sequence number this update occurred in.
-    cp_sequence_number: i64,
-    /// Sentinel value to indicate whether the record is a tombstone.
-    deleted: bool,
-}
-
-/// Representation of a row from the `walrus_blob_historical` table, which tracks historical changes
-/// to relevant Metadata dynamic fields. This is almost identical to the StoredWalrusBlob struct,
-/// except that this struct does not use a `deleted` sentinel value, but rather records deletions
-/// with optional columns set to NULL.
-#[derive(Insertable, Debug, FieldCount, Clone)]
-#[diesel(table_name = walrus_blob_historical)]
-#[diesel(treat_none_as_null = true)]
-pub struct StoredWalrusBlobHistorical {
-    /// The ID of the address that owns the Blob object.
-    address_owner: Option<Vec<u8>>,
-    /// The file path of the Blob object that owns the Metadata dynamic field.
-    file_path: Option<String>,
-    /// The Blob ID to be used to fetch the Walrus blob. This can be selected in postgres with:
-    ///
-    /// SELECT replace(replace(rtrim(encode(blob_id, 'base64'), '='), '+', '-'), '/', '_') as
-    /// blob_id FROM walrus_blob;
-    blob_id: Option<Vec<u8>>,
-    /// The ID of the owner of the Blob object that owns the Metadata dynamic field.
-    owner_id: Option<Vec<u8>>,
-    /// The ID of the Metadata dynamic field.
-    dynamic_field_id: Vec<u8>,
-    /// The checkpoint sequence number this update occurred in.
-    cp_sequence_number: i64,
-}
+use crate::schema::walrus_blob;
+use crate::storage::StoredWalrusBlob;
+use crate::types::{Blob, BlobAttribute, DynamicFieldName};
 
 // ============================================================================
 // PROCESSING TYPES
@@ -232,76 +134,30 @@ impl Handler for WalrusBlobPipeline {
         values: &[Self::Value],
         conn: &mut postgres::Connection<'a>,
     ) -> Result<usize> {
-        let (upserts, deletes): (Vec<StoredWalrusBlob>, Vec<StoredWalrusBlob>) = values
+        let stored_values: Vec<StoredWalrusBlob> = values
             .into_iter()
             .map(|v| v.try_into())
-            // Even though we end up having to iterate twice, we early return on any conversion
-            // error.
-            .collect::<Result<Vec<StoredWalrusBlob>>>()?
-            .into_iter()
-            .partition(|commit| !commit.deleted);
+            .collect::<Result<Vec<StoredWalrusBlob>>>()?;
 
         let mut total_affected = 0;
 
-        if !upserts.is_empty() {
-            total_affected += diesel::insert_into(walrus_blob::table)
-                .values(&upserts)
-                .on_conflict((walrus_blob::address_owner, walrus_blob::file_path))
-                .do_update()
-                .set((
-                    walrus_blob::dynamic_field_id.eq(excluded(walrus_blob::dynamic_field_id)),
-                    walrus_blob::cp_sequence_number.eq(excluded(walrus_blob::cp_sequence_number)),
-                    walrus_blob::owner_id.eq(excluded(walrus_blob::owner_id)),
-                    walrus_blob::address_owner.eq(excluded(walrus_blob::address_owner)),
-                    walrus_blob::file_path.eq(excluded(walrus_blob::file_path)),
-                    walrus_blob::blob_id.eq(excluded(walrus_blob::blob_id)),
-                    walrus_blob::deleted.eq(false),
-                ))
-                .filter(
-                    walrus_blob::cp_sequence_number.lt(excluded(walrus_blob::cp_sequence_number)),
-                )
-                .execute(conn)
-                .await?;
-
-            let historical_upserts: Vec<StoredWalrusBlobHistorical> =
-                upserts.iter().map(|v| v.into_historical()).collect();
-
-            // All updates are recorded in the historical table.
-            total_affected += diesel::insert_into(walrus_blob_historical::table)
-                .values(historical_upserts)
-                .on_conflict_do_nothing()
-                .execute(conn)
-                .await?;
-        }
-
-        if deletes.is_empty() {
-            tracing::info!("No deletes found");
-        }
-
-        if !deletes.is_empty() {
-            total_affected += diesel::insert_into(walrus_blob::table)
-                .values(&deletes)
-                .on_conflict((walrus_blob::address_owner, walrus_blob::file_path))
-                .do_update()
-                .set((
-                    walrus_blob::deleted.eq(true),
-                    walrus_blob::cp_sequence_number.eq(excluded(walrus_blob::cp_sequence_number)),
-                ))
-                .filter(
-                    walrus_blob::cp_sequence_number.lt(excluded(walrus_blob::cp_sequence_number)),
-                )
-                .execute(conn)
-                .await?;
-
-            let historical_deletes: Vec<StoredWalrusBlobHistorical> =
-                deletes.iter().map(|v| v.into_historical()).collect();
-
-            total_affected += diesel::insert_into(walrus_blob_historical::table)
-                .values(historical_deletes)
-                .on_conflict_do_nothing()
-                .execute(conn)
-                .await?;
-        }
+        // Handle all upserts and deletes for the main table
+        total_affected += diesel::insert_into(walrus_blob::table)
+            .values(&stored_values)
+            .on_conflict((walrus_blob::address_owner, walrus_blob::file_path))
+            .do_update()
+            .set((
+                walrus_blob::dynamic_field_id.eq(excluded(walrus_blob::dynamic_field_id)),
+                walrus_blob::cp_sequence_number.eq(excluded(walrus_blob::cp_sequence_number)),
+                walrus_blob::owner_id.eq(excluded(walrus_blob::owner_id)),
+                walrus_blob::address_owner.eq(excluded(walrus_blob::address_owner)),
+                walrus_blob::file_path.eq(excluded(walrus_blob::file_path)),
+                walrus_blob::blob_id.eq(excluded(walrus_blob::blob_id)),
+                walrus_blob::deleted.eq(excluded(walrus_blob::deleted)),
+            ))
+            .filter(walrus_blob::cp_sequence_number.lt(excluded(walrus_blob::cp_sequence_number)))
+            .execute(conn)
+            .await?;
 
         Ok(total_affected)
     }
@@ -386,33 +242,6 @@ impl WalrusBlobPipeline {
         let file_path = metadata.metadata.get(&"path".to_owned())?.to_string();
 
         Some((file_path, parent_id))
-    }
-}
-
-impl StoredWalrusBlob {
-    /// Convert the StoredWalrusBlob into a StoredWalrusBlobHistorical struct. If the original
-    /// struct is marked for deletion, the historical struct will also be configured as a sentinel
-    /// row.
-    pub fn into_historical(&self) -> StoredWalrusBlobHistorical {
-        if self.deleted {
-            StoredWalrusBlobHistorical {
-                dynamic_field_id: self.dynamic_field_id.clone(),
-                cp_sequence_number: self.cp_sequence_number,
-                owner_id: None,
-                address_owner: None,
-                file_path: None,
-                blob_id: None,
-            }
-        } else {
-            StoredWalrusBlobHistorical {
-                dynamic_field_id: self.dynamic_field_id.clone(),
-                cp_sequence_number: self.cp_sequence_number,
-                owner_id: Some(self.owner_id.clone()),
-                address_owner: Some(self.address_owner.clone()),
-                file_path: Some(self.file_path.clone()),
-                blob_id: Some(self.blob_id.clone()),
-            }
-        }
     }
 }
 
