@@ -7,6 +7,7 @@ use diesel::prelude::*;
 use diesel::query_dsl::methods::FilterDsl;
 use diesel::upsert::excluded;
 use diesel_async::RunQueryDsl;
+use move_core_types::language_storage::StructTag;
 use serde::{Deserialize, Serialize};
 use sui_indexer_alt_framework::pipeline::{concurrent::Handler, Processor};
 use sui_indexer_alt_framework::postgres;
@@ -139,7 +140,9 @@ pub struct ProcessedWalrusMetadata {
     deleted: bool,
 }
 
-pub struct WalrusBlobPipeline;
+pub struct WalrusBlobPipeline {
+    metadata_type: StructTag,
+}
 
 impl Processor for WalrusBlobPipeline {
     const NAME: &'static str = "walrus_blob";
@@ -161,7 +164,8 @@ impl Processor for WalrusBlobPipeline {
             if !latest_live_output_objects.contains_key(object_id) {
                 // We only care to emit a record for `Metadata` dynamic fields with the key-value
                 // attribute of interest.
-                let Some((file_path, parent_id)) = extract_file_path_and_parent_id(object) else {
+                let Some((file_path, parent_id)) = self.extract_file_path_and_parent_id(object)
+                else {
                     continue;
                 };
 
@@ -190,7 +194,7 @@ impl Processor for WalrusBlobPipeline {
         }
 
         for (object_id, object) in latest_live_output_objects.iter() {
-            if let Some((file_path, parent_id)) = extract_file_path_and_parent_id(object) {
+            if let Some((file_path, parent_id)) = self.extract_file_path_and_parent_id(object) {
                 // Ignore mutations to the dynamic field.
                 if let Some(_) = checkpoint_input_objects.get(object_id) {
                     continue;
@@ -363,6 +367,62 @@ impl From<&StoredWalrusBlob> for StoredWalrusBlobHistorical {
     }
 }
 
+impl WalrusBlobPipeline {
+    pub fn new(type_string: &str) -> Result<Self> {
+        let metadata_type = parse_sui_struct_tag(type_string)?;
+        Ok(WalrusBlobPipeline { metadata_type })
+    }
+
+    /// Try to deserialize the object as a Walrus Metadata dynamic field, and return the
+    /// deserialized data and the parent object ID, or return None if it is not.
+    pub fn get_metadata(
+        &self,
+        object: &Object,
+    ) -> anyhow::Result<Option<(BlobAttribute, ObjectID)>> {
+        let Some(type_) = object.type_() else {
+            return Ok(None);
+        };
+
+        if let Owner::ObjectOwner(parent_id) = object.owner() {
+            // The expected type of the dynamic field is a `Field<DynamicFieldName, BlobAttribute>`.
+            if type_.is(&self.metadata_type) {
+                let move_object = object
+                    .data
+                    .try_as_move()
+                    .ok_or_else(|| anyhow::anyhow!("Not a Move object"))?;
+
+                // This is called during `process`, so the indexing framework can trace the error
+                let field: Field<DynamicFieldName, BlobAttribute> =
+                    bcs::from_bytes(move_object.contents()).context("Failed to deserialize")?;
+
+                Ok(Some((field.value, (*parent_id).into())))
+            } else {
+                Ok(None)
+            }
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Extract the file path from the object if it is a walrus metadata dynamic field, otherwise
+    /// return None.
+    pub fn extract_file_path_and_parent_id(&self, object: &Object) -> Option<(String, ObjectID)> {
+        let Some((metadata, parent_id)) = self.get_metadata(object).ok()? else {
+            return None;
+        };
+
+        let Some(file_path) = metadata
+            .metadata
+            .get(&"path".to_string())
+            .map(|s| s.to_string())
+        else {
+            return None;
+        };
+
+        Some((file_path, parent_id))
+    }
+}
+
 /// Returns the first appearance of all objects that were used as inputs to the transactions in the
 /// checkpoint. These are objects that existed prior to the checkpoint, and excludes objects that
 /// were created or unwrapped within the checkpoint.
@@ -413,59 +473,4 @@ pub fn checkpoint_input_objects(
         }
     }
     Ok(checkpoint_input_objects)
-}
-
-/// Extract the file path from the object if it is a walrus metadata dynamic field, otherwise return
-/// None.
-pub fn extract_file_path_and_parent_id(object: &Object) -> Option<(String, ObjectID)> {
-    let Some((metadata, parent_id)) = get_metadata(object).ok()? else {
-        return None;
-    };
-
-    let Some(file_path) = metadata
-        .metadata
-        .get(&"path".to_string())
-        .map(|s| s.to_string())
-    else {
-        return None;
-    };
-
-    Some((file_path, parent_id))
-}
-
-/// Try to deserialize the object as a Walrus Metadata dynamic field, and return the deserialized
-/// data and the parent object ID, or return None if it is not.
-pub fn get_metadata(object: &Object) -> anyhow::Result<Option<(BlobAttribute, ObjectID)>> {
-    let Some(type_) = object.type_() else {
-        return Ok(None);
-    };
-
-    if let Owner::ObjectOwner(parent_id) = object.owner() {
-        // The expected type of the dynamic field is a `Field<DynamicFieldName, BlobAttribute>`.
-        let expected_obj_type = parse_sui_struct_tag(
-            "0x2::dynamic_field::Field<vector<u8>, 0xfdc88f7d7cf30afab2f82e8380d11ee8f70efb90e863d1de8616fae1bb09ea77::metadata::Metadata>"
-        )?;
-
-        if type_.is(&expected_obj_type) {
-            let move_object = object
-                .data
-                .try_as_move()
-                .ok_or_else(|| anyhow::anyhow!("Not a Move object"))?;
-
-            let field: Field<DynamicFieldName, BlobAttribute> =
-                match bcs::from_bytes(move_object.contents()) {
-                    Ok(field) => field,
-                    Err(e) => {
-                        tracing::error!("Failed to deserialize: {:?}", e);
-                        return Err(anyhow::anyhow!("Failed to deserialize: {}", e));
-                    }
-                };
-
-            Ok(Some((field.value, (*parent_id).into())))
-        } else {
-            Ok(None)
-        }
-    } else {
-        Ok(None)
-    }
 }

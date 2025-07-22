@@ -26,8 +26,13 @@ async fn main() -> Result<()> {
     let mut indexer =
         IndexerCluster::new(args.database_url, args.cluster_args, Some(&MIGRATIONS)).await?;
 
+    // Indexers should be chain agnostic, so in a production deployment, this should be a value that
+    // is passed to the service, rather than hardcoded here.
+    let walrus_blob_pipeline = WalrusBlobPipeline::new(
+            "0x2::dynamic_field::Field<vector<u8>, 0xfdc88f7d7cf30afab2f82e8380d11ee8f70efb90e863d1de8616fae1bb09ea77::metadata::Metadata>").unwrap();
+
     indexer
-        .concurrent_pipeline(WalrusBlobPipeline, ConcurrentConfig::default())
+        .concurrent_pipeline(walrus_blob_pipeline, ConcurrentConfig::default())
         .await?;
 
     let _ = indexer.run().await?.await;
