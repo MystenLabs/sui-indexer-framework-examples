@@ -2,7 +2,7 @@ use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 
-use anyhow::{self, Context};
+use anyhow::{self, bail, Context};
 use diesel::prelude::*;
 use diesel::query_dsl::methods::FilterDsl;
 use diesel::upsert::excluded;
@@ -89,6 +89,7 @@ pub struct StoredWalrusBlob {
     owner_id: Vec<u8>,
     /// The ID of the Metadata dynamic field.
     dynamic_field_id: Vec<u8>,
+    /// The version of the Metadata dynamic field.
     /// The checkpoint sequence number this update occurred in.
     cp_sequence_number: i64,
     /// Sentinel value to indicate whether the record is a tombstone.
@@ -152,72 +153,71 @@ impl Processor for WalrusBlobPipeline {
     fn process(&self, checkpoint: &Arc<CheckpointData>) -> Result<Vec<Self::Value>> {
         let cp_sequence_number = checkpoint.checkpoint_summary.sequence_number;
         let checkpoint_input_objects = checkpoint_input_objects(checkpoint)?;
-        let latest_live_output_objects = checkpoint
-            .latest_live_output_objects()
-            .into_iter()
-            .map(|o| (o.id(), o))
-            .collect::<BTreeMap<_, _>>();
+        let latest_live_output_objects = checkpoint_output_objects(checkpoint)?;
+        // Collect values to be passed to committer.
         let mut values: BTreeMap<ObjectID, Self::Value> = BTreeMap::new();
 
+        // Process relevant objects that were wrapped or deleted in this checkpoint.
         for (object_id, object) in checkpoint_input_objects.iter() {
-            // If an object appears only in the input objects, it must have been deleted or wrapped.
-            if !latest_live_output_objects.contains_key(object_id) {
-                // We only care to emit a record for `Metadata` dynamic fields with the key-value
-                // attribute of interest.
-                let Some((file_path, parent_id)) = self.extract_file_path_and_parent_id(object)
-                else {
-                    continue;
-                };
-
-                // The parent object must also exist at least as the input into the checkpoint. We
-                // can consult the input state to determine the correct record to update on the main
-                // table.
-                let Some(parent_object) = checkpoint_input_objects.get(&parent_id) else {
-                    tracing::error!("Parent object {} not found among input objects", parent_id);
-                    continue;
-                };
-
-                // If an input object is not in the latest live output objects, it must have been
-                // deleted or wrapped in this checkpoint. An entry is written for this deletion, so
-                // that we don't include the deleted object when querying.
-                values.insert(
-                    *object_id,
-                    ProcessedWalrusMetadata {
-                        cp_sequence_number: cp_sequence_number as i64,
-                        parent_object: (*parent_object).clone(),
-                        dynamic_field_id: *object_id,
-                        file_path,
-                        deleted: true,
-                    },
-                );
+            if latest_live_output_objects.contains_key(object_id) {
+                continue;
             }
+
+            // We only care to emit a record for `Metadata` dynamic fields with the key-value
+            // attribute of interest.
+            let Some((file_path, parent_id)) = self.extract_file_path_and_parent_id(object) else {
+                continue;
+            };
+
+            // The parent object must also exist at least as the input into the checkpoint. We can
+            // consult the input state to determine the correct record to update on the main table.
+            let Some(parent_object) = checkpoint_input_objects.get(&parent_id) else {
+                tracing::error!("Parent object {} not found among input objects", parent_id);
+                continue;
+            };
+
+            // If an input object is not in the latest live output objects, it must have been
+            // deleted or wrapped in this checkpoint. An entry is written for this deletion, so
+            // that we don't include the deleted object when querying.
+            values.insert(
+                *object_id,
+                ProcessedWalrusMetadata {
+                    cp_sequence_number: cp_sequence_number as i64,
+                    parent_object: (*parent_object).clone(),
+                    dynamic_field_id: *object_id,
+                    file_path,
+                    deleted: true,
+                },
+            );
         }
 
         for (object_id, object) in latest_live_output_objects.iter() {
-            if let Some((file_path, parent_id)) = self.extract_file_path_and_parent_id(object) {
-                // Ignore mutations to the dynamic field.
-                if let Some(_) = checkpoint_input_objects.get(object_id) {
-                    continue;
-                }
-
-                // The parent object must also exist: retrieve it for address_owner, blob_id, and
-                // other fields.
-                let Some(parent_object) = latest_live_output_objects.get(&parent_id) else {
-                    tracing::error!("Parent object {} not found among output objects", parent_id);
-                    continue;
-                };
-
-                values.insert(
-                    *object_id,
-                    ProcessedWalrusMetadata {
-                        cp_sequence_number: cp_sequence_number as i64,
-                        parent_object: (*parent_object).clone(),
-                        dynamic_field_id: *object_id,
-                        file_path,
-                        deleted: false,
-                    },
-                );
+            // Ignore mutations to the dynamic field.
+            if checkpoint_input_objects.contains_key(object_id) {
+                continue;
             }
+
+            let Some((file_path, parent_id)) = self.extract_file_path_and_parent_id(object) else {
+                continue;
+            };
+
+            // The parent object must also exist: retrieve it for address_owner, blob_id, and
+            // other fields.
+            let Some(parent_object) = latest_live_output_objects.get(&parent_id) else {
+                tracing::error!("Parent object {} not found among output objects", parent_id);
+                continue;
+            };
+
+            values.insert(
+                *object_id,
+                ProcessedWalrusMetadata {
+                    cp_sequence_number: cp_sequence_number as i64,
+                    parent_object: (*parent_object).clone(),
+                    dynamic_field_id: *object_id,
+                    file_path,
+                    deleted: false,
+                },
+            );
         }
 
         Ok(values.into_values().collect())
@@ -264,7 +264,7 @@ impl Handler for WalrusBlobPipeline {
                 .await?;
 
             let historical_upserts: Vec<StoredWalrusBlobHistorical> =
-                upserts.iter().map(|v| v.into()).collect();
+                upserts.iter().map(|v| v.into_historical()).collect();
 
             // All updates are recorded in the historical table.
             total_affected += diesel::insert_into(walrus_blob_historical::table)
@@ -294,7 +294,7 @@ impl Handler for WalrusBlobPipeline {
                 .await?;
 
             let historical_deletes: Vec<StoredWalrusBlobHistorical> =
-                deletes.iter().map(|v| v.into()).collect();
+                deletes.iter().map(|v| v.into_historical()).collect();
 
             total_affected += diesel::insert_into(walrus_blob_historical::table)
                 .values(historical_deletes)
@@ -323,14 +323,10 @@ impl TryInto<StoredWalrusBlob> for &ProcessedWalrusMetadata {
                 .contents(),
         )?;
 
-        let address_owner = match self.parent_object.owner() {
-            Owner::AddressOwner(id) => id.to_vec(),
-            _ => {
-                return Err(anyhow::anyhow!(
-                    "Parent object's owner is not an address owner"
-                ))
-            }
+        let Owner::AddressOwner(id) = self.parent_object.owner() else {
+            bail!("Parent object's owner is not an address owner");
         };
+        let address_owner = id.to_vec();
 
         Ok(StoredWalrusBlob {
             dynamic_field_id: self.dynamic_field_id.to_vec(),
@@ -341,29 +337,6 @@ impl TryInto<StoredWalrusBlob> for &ProcessedWalrusMetadata {
             blob_id: blob_object.blob_id.0.to_vec(),
             deleted: self.deleted,
         })
-    }
-}
-
-impl From<&StoredWalrusBlob> for StoredWalrusBlobHistorical {
-    fn from(value: &StoredWalrusBlob) -> Self {
-        if value.deleted {
-            return StoredWalrusBlobHistorical {
-                dynamic_field_id: value.dynamic_field_id.clone(),
-                cp_sequence_number: value.cp_sequence_number,
-                owner_id: None,
-                address_owner: None,
-                file_path: None,
-                blob_id: None,
-            };
-        }
-        StoredWalrusBlobHistorical {
-            dynamic_field_id: value.dynamic_field_id.clone(),
-            cp_sequence_number: value.cp_sequence_number,
-            owner_id: Some(value.owner_id.clone()),
-            address_owner: Some(value.address_owner.clone()),
-            file_path: Some(value.file_path.clone()),
-            blob_id: Some(value.blob_id.clone()),
-        }
     }
 }
 
@@ -379,47 +352,67 @@ impl WalrusBlobPipeline {
         &self,
         object: &Object,
     ) -> anyhow::Result<Option<(BlobAttribute, ObjectID)>> {
+        // Must be a MoveObject
         let Some(type_) = object.type_() else {
             return Ok(None);
         };
 
-        if let Owner::ObjectOwner(parent_id) = object.owner() {
-            // The expected type of the dynamic field is a `Field<DynamicFieldName, BlobAttribute>`.
-            if type_.is(&self.metadata_type) {
-                let move_object = object
-                    .data
-                    .try_as_move()
-                    .ok_or_else(|| anyhow::anyhow!("Not a Move object"))?;
+        // Dynamic fields must have an ObjectOwner
+        let Owner::ObjectOwner(parent_id) = object.owner() else {
+            return Ok(None);
+        };
 
-                // This is called during `process`, so the indexing framework can trace the error
-                let field: Field<DynamicFieldName, BlobAttribute> =
-                    bcs::from_bytes(move_object.contents()).context("Failed to deserialize")?;
-
-                Ok(Some((field.value, (*parent_id).into())))
-            } else {
-                Ok(None)
-            }
-        } else {
-            Ok(None)
+        // The expected type of the dynamic field is a `Field<DynamicFieldName, BlobAttribute>`.
+        if !type_.is(&self.metadata_type) {
+            return Ok(None);
         }
+
+        let move_object = object
+            .data
+            .try_as_move()
+            .ok_or_else(|| anyhow::anyhow!("Not a Move object"))?;
+
+        // This is called during `process`, so the indexing framework can trace the error
+        let field: Field<DynamicFieldName, BlobAttribute> =
+            bcs::from_bytes(move_object.contents()).context("Failed to deserialize")?;
+
+        Ok(Some((field.value, (*parent_id).into())))
     }
 
     /// Extract the file path from the object if it is a walrus metadata dynamic field, otherwise
     /// return None.
     pub fn extract_file_path_and_parent_id(&self, object: &Object) -> Option<(String, ObjectID)> {
-        let Some((metadata, parent_id)) = self.get_metadata(object).ok()? else {
-            return None;
-        };
-
-        let Some(file_path) = metadata
-            .metadata
-            .get(&"path".to_string())
-            .map(|s| s.to_string())
-        else {
-            return None;
-        };
+        let (metadata, parent_id) = self.get_metadata(object).ok()??;
+        let file_path = metadata.metadata.get(&"path".to_owned())?.to_string();
 
         Some((file_path, parent_id))
+    }
+}
+
+impl StoredWalrusBlob {
+    /// Convert the StoredWalrusBlob into a StoredWalrusBlobHistorical struct. If the original
+    /// struct is marked for deletion, the historical struct will also be configured as a sentinel
+    /// row.
+    pub fn into_historical(&self) -> StoredWalrusBlobHistorical {
+        if self.deleted {
+            StoredWalrusBlobHistorical {
+                dynamic_field_id: self.dynamic_field_id.clone(),
+                cp_sequence_number: self.cp_sequence_number,
+                owner_id: None,
+                address_owner: None,
+                file_path: None,
+                blob_id: None,
+            }
+        } else {
+            StoredWalrusBlobHistorical {
+                dynamic_field_id: self.dynamic_field_id.clone(),
+                cp_sequence_number: self.cp_sequence_number,
+                owner_id: Some(self.owner_id.clone()),
+                address_owner: Some(self.address_owner.clone()),
+                file_path: Some(self.file_path.clone()),
+                blob_id: Some(self.blob_id.clone()),
+            }
+        }
     }
 }
 
@@ -473,4 +466,39 @@ pub fn checkpoint_input_objects(
         }
     }
     Ok(checkpoint_input_objects)
+}
+
+/// Returns all versions of objects that were output by transactions in the checkpoint, and are
+/// still live at the end of the checkpoint.
+pub(crate) fn checkpoint_output_objects(
+    checkpoint: &CheckpointData,
+) -> anyhow::Result<BTreeMap<ObjectID, &Object>> {
+    let mut output_objects = BTreeMap::new();
+    for tx in &checkpoint.transactions {
+        let output_objects_map: BTreeMap<_, _> = tx
+            .output_objects
+            .iter()
+            .map(|obj| ((obj.id(), obj.version()), obj))
+            .collect();
+
+        for change in tx.effects.object_changes() {
+            let id = change.id;
+
+            // Clear the previous entry, in case it was created within this checkpoint.
+            output_objects.remove(&id);
+
+            let Some(version) = change.output_version else {
+                continue;
+            };
+
+            let output_object = output_objects_map
+                .get(&(id, version))
+                .copied()
+                .with_context(|| format!("{id} at {version} in effects, not in output_objects"))?;
+
+            output_objects.insert(id, output_object);
+        }
+    }
+
+    Ok(output_objects)
 }

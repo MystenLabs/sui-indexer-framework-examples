@@ -8,13 +8,15 @@ diesel::table! {
         owner_id -> Bytea,
         dynamic_field_id -> Bytea,
         cp_sequence_number -> Int8,
+        df_version -> Int8,
         deleted -> Nullable<Bool>,
     }
 }
 
 diesel::table! {
-    walrus_blob_historical (dynamic_field_id, cp_sequence_number) {
+    walrus_blob_historical (dynamic_field_id, df_version) {
         dynamic_field_id -> Bytea,
+        df_version -> Int8,
         cp_sequence_number -> Int8,
         owner_id -> Nullable<Bytea>,
         address_owner -> Nullable<Bytea>,
