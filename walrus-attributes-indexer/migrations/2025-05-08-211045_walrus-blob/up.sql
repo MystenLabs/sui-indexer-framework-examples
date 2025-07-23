@@ -1,6 +1,9 @@
 -- This table maps file paths to their latest dynamic field metadata. The dynamic_field_id
 -- references a Metadata dynamic field on a Sui Blob object, which gives us access to both the
--- blob_id pointing to the actual file contents and the address_owner of the Blob object.
+-- blob_id pointing to the actual file contents and the address_owner of the Blob object. This table
+-- is keyed on (address_owner, file_path); because we restrict users to creating or deleting
+-- Metadata only, different versions of a file that share a file path will have to correspond to
+-- different Blob objects on Sui with different Metadatas.
 CREATE TABLE IF NOT EXISTS walrus_blob (
     -- Address that owns the Blob object on Sui
     address_owner               BYTEA         NOT NULL,
@@ -32,10 +35,10 @@ CREATE INDEX IF NOT EXISTS walrus_blob_can_delete_idx ON walrus_blob
 WHERE deleted = TRUE;
 
 
--- This table tracks historical changes to relevant Metadata dynamic fields. Unlike the main table,
--- the historical table is keyed on dynamic_field_id and df_version to capture the full history of
--- object changes. If the nullable columns are null, then the record is a tombstone record
--- indicating that the file_path to blob_id mapping has been deleted by the user.
+-- This table tracks per-object historical changes to relevant Metadata dynamic fields. Unlike the
+-- main table, this table is keyed on dynamic_field_id and df_version to capture the full
+-- history of object changes. If the nullable columns are null, then the record is a tombstone
+-- record indicating that the file_path to blob_id mapping has been deleted by the user.
 CREATE TABLE IF NOT EXISTS walrus_blob_historical (
     -- ID of the Metadata dynamic field of key-value attributes on the Blob object
     dynamic_field_id            BYTEA         NOT NULL,

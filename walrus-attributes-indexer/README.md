@@ -42,7 +42,7 @@ diesel database reset --database-url=... --migration-dir migrations
 
 ## Walrus Blob Pipeline
 
-The Walrus Blob Pipeline is a concurrent pipeline that writes the latest state of the `Metadata` dynamic fields to the `walrus_blob` table. It operates on a checkpoint granularity, so any modifications made to the same dynamic field within a checkpoint are not reflected on the table, and only the final update is persisted. This is fine since the indexer assumes that `Metadata` dynamic fields can only be created or deleted.
+The Walrus Blob Pipeline is a concurrent pipeline that writes the latest state of the `Metadata` dynamic fields to the `walrus_blob` table. It operates on a checkpoint granularity, and upserts records, such that only the final update to an object in a checkpoint is persisted.
 
 On commit, we handle out-of-order writes by using the `address_owner` and `file_path` columns as the primary key, and filtering on the `cp_sequence_number` column to ensure that on constraint violation, we persist the update only if it is newer than the existing row.
 
@@ -52,6 +52,4 @@ This pipeline is also a concurrent pipeline, but unlike the Walrus Blob Pipeline
 
 ## Chain-agnostic Indexer
 
-For the purpose of this guide, the StructTag of the `Metadata` dynamic field is hardcoded in
-`main.rs`. Ideally, in a production deployment, this should be a value that is passed to the
-service.
+For the purpose of this guide, the StructTag of the `Metadata` dynamic field is hardcoded in `main.rs`. Ideally, in a production deployment, this should be a value that is passed to the service.
