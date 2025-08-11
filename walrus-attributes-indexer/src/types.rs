@@ -84,14 +84,26 @@ pub fn get_metadata(
     Ok(Some((field.value, (*parent_id).into())))
 }
 
-/// Extract the file path from the object if it is a walrus metadata dynamic field, otherwise
-/// return None.
-pub fn extract_file_path_and_parent_id(
+/// Extract the title and view_count from the object if it is a walrus metadata dynamic field,
+/// otherwise return None.
+pub fn extract_values_and_parent_id(
     tag: &StructTag,
     object: &Object,
-) -> Option<(String, ObjectID)> {
-    let (metadata, parent_id) = get_metadata(tag, object).ok()??;
-    let file_path = metadata.metadata.get(&"path".to_owned())?.to_string();
+) -> anyhow::Result<Option<((String, u64), ObjectID)>> {
+    let Some((metadata, parent_id)) = get_metadata(tag, object)? else {
+        return Ok(None);
+    };
 
-    Some((file_path, parent_id))
+    let (Some(title), Some(view_count)) = (
+        metadata.metadata.get(&"title".to_owned()),
+        metadata.metadata.get(&"view_count".to_owned()),
+    ) else {
+        return Err(anyhow::anyhow!("Missing title or view_count"));
+    };
+
+    let view_count = view_count
+        .parse::<u64>()
+        .context("Failed to parse view_count")?;
+
+    Ok(Some(((title.to_string(), view_count), parent_id)))
 }

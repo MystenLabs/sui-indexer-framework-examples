@@ -23,7 +23,7 @@ use sui_indexer_alt_framework::Result;
 
 use crate::schema::blog_post;
 use crate::storage::StoredBlogPost;
-use crate::types::{extract_file_path_and_parent_id, Blob};
+use crate::types::{extract_values_and_parent_id, Blob};
 
 // ============================================================================
 // PROCESSING TYPES
@@ -41,10 +41,10 @@ pub enum ProcessedWalrusMetadata {
         sui_blob_object: Object,
         /// The ID of the Metadata dynamic field.
         dynamic_field_id: ObjectID,
-        /// The user-provided file path to be associated with the blob.
-        file_path: String,
         /// The version of the Metadata dynamic field.
         df_version: u64,
+        view_count: u64,
+        title: String,
     },
     /// Tracks the deletion of a Metadata dynamic field. When committing, this will delete the
     /// existing row.
@@ -77,27 +77,26 @@ impl Processor for BlogPostPipeline {
 
             // Check the checkpoint input state of the Metadata dynamic field to see if it's
             // relevant to our indexing.
-            let Some((file_path, _)) = extract_file_path_and_parent_id(&self.metadata_type, object)
-            else {
+            let Some((_, _)) = extract_values_and_parent_id(&self.metadata_type, object)? else {
                 continue;
             };
 
             // Since the table is keyed on the dynamic field id, this is all the information we need
-            // to delete the correct entry.
+            // to delete the correct entry in the commit fn.
             values.insert(*object_id, ProcessedWalrusMetadata::Delete(*object_id));
         }
 
         for (object_id, object) in latest_live_output_objects.iter() {
             // We only care to emit a record for `Metadata` dynamic fields if they have the "path"
             // key-value attribute.
-            let Some((file_path, parent_id)) =
-                extract_file_path_and_parent_id(&self.metadata_type, object)
+            let Some(((title, view_count), parent_id)) =
+                extract_values_and_parent_id(&self.metadata_type, object)?
             else {
                 continue;
             };
 
-            // The parent object must also exist: retrieve it for address_owner, blob_id, and
-            // other fields.
+            // The parent object must also exist: retrieve it for publisher, blob_id, and other
+            // fields for traceability.
             let Some(parent_object) = latest_live_output_objects.get(&parent_id) else {
                 bail!(
                     "Parent Blob object {} not found among output objects for Metadata {}",
@@ -112,7 +111,8 @@ impl Processor for BlogPostPipeline {
                     df_version: object.version().into(),
                     sui_blob_object: (*parent_object).clone(),
                     dynamic_field_id: *object_id,
-                    file_path,
+                    title,
+                    view_count,
                 },
             );
         }
@@ -218,8 +218,9 @@ impl ProcessedWalrusMetadata {
             ProcessedWalrusMetadata::Upsert {
                 sui_blob_object,
                 dynamic_field_id,
-                file_path,
                 df_version,
+                title,
+                view_count,
             } => {
                 let blob_object: Blob = bcs::from_bytes(
                     sui_blob_object
@@ -240,9 +241,8 @@ impl ProcessedWalrusMetadata {
                     owner_id: sui_blob_object.id().to_vec(),
                     dynamic_field_id: dynamic_field_id.to_vec(),
                     df_version: *df_version as i64,
-                    // TODO: use actual values
-                    view_count: 0,
-                    title: file_path.clone(),
+                    view_count: *view_count as i64,
+                    title: title.clone(),
                 })
             }
             ProcessedWalrusMetadata::Delete(_) => {
