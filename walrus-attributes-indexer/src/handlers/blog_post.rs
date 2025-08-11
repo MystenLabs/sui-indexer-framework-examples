@@ -171,7 +171,7 @@ impl Handler for BlogPostPipeline {
         if !to_upsert.is_empty() {
             let upserted_count = diesel::insert_into(blog_post::table)
                 .values(&to_upsert)
-                .on_conflict((blog_post::publisher, blog_post::dynamic_field_id))
+                .on_conflict(blog_post::dynamic_field_id)
                 .do_update()
                 .set((
                     blog_post::df_version.eq(excluded(blog_post::df_version)),

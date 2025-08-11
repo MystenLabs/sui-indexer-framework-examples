@@ -13,7 +13,7 @@ Index `view_count` and `title` attributes from `Metadata` dynamic fields on `Blo
 To run the indexer:
 
 ```sh
-$ RUST_LOG=info cargo run --release -- \
+RUST_LOG=info cargo run --release -- \
     --remote-store-url https://checkpoints.mainnet.sui.io
 ```
 
@@ -88,3 +88,36 @@ impl Default for IngestionConfig {
 ```
 
 This means that by default, the blog post pipeline will have a write concurrency of 5, and the regulator will buffer at most 5000 checkpoints from the latest checkpoint committed by the blog post pipeline.
+
+## Follow-Along
+The following uploads the `blog_post.rs` file to Walrus, and runs the indexer locally with `--last-checkpoint` to verify that the indexer is working correctly.
+
+```
+walrus store blog_post.rs
+
+# Blob ID: qc3Qpe5XP7umQUI1ouKptiQtdIZ6q08Ga6qNIZjYIAs
+# Sui object ID: 0xf245d6321bd5ba4054b9d72db2c7bd1559b676a8bd52feb6bff9aba8ff980685
+
+# Checkpoint 177899028
+walrus set-blob-attribute 0xf245d6321bd5ba4054b9d72db2c7bd1559b676a8bd52feb6bff9aba8ff980685 --attr view_count 5 --attr title "Blog post module"
+
+walrus get-blob-attribute 0xf245d6321bd5ba4054b9d72db2c7bd1559b676a8bd52feb6bff9aba8ff980685
+# Attribute
+# view_count: 5
+# title: Blog post module
+```
+
+Attributes then modified again at 177899471 and 177899535
+
+Run the indexer with `--last-checkpoint` set to before 177899471. When querying the `blog_post` table, you should see:
+`select publisher, replace(replace(rtrim(encode(blob_id, 'base64'), '='), '+', '-'), '/', '_') as blob_id, dynamic_field_id, df_version, view_count, title from blog_post;`
+
+|                             publisher                              |                   blob_id                   |                          dynamic_field_id                          | df_version | view_count |      title       |
+|--------------------------------------------------------------------+---------------------------------------------+--------------------------------------------------------------------+------------+------------+------------------|
+| \xfe9c7a465f63388e5b95c8fd2db857fad4356fc873f96900f4d8b6e7fc1e760e | qc3Qpe5XP7umQUI1ouKptiQtdIZ6q08Ga6qNIZjYIAs | \x1fd611ac738d6341ca42071f1a386946e5ff5278285bc37145263b8ca5bed0f1 |  606102706 |          5 | Blog post module |
+
+Resume the indexer, and run beyond checkpoint 177899535. When querying the `blog_post` table, you should see:
+
+|                             publisher                              |                   blob_id                   |                          dynamic_field_id                          | df_version | view_count |      title       |
+|--------------------------------------------------------------------+---------------------------------------------+--------------------------------------------------------------------+------------+------------+------------------|
+| \xfe9c7a465f63388e5b95c8fd2db857fad4356fc873f96900f4d8b6e7fc1e760e | qc3Qpe5XP7umQUI1ouKptiQtdIZ6q08Ga6qNIZjYIAs | \x1fd611ac738d6341ca42071f1a386946e5ff5278285bc37145263b8ca5bed0f1 |  606102708 |         10 | Blob Post Module |
