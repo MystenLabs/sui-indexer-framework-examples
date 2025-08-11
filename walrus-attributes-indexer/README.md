@@ -2,12 +2,12 @@
 
 ## Quickstart
 
-Index `"path": {value}"` attribute pairs from `Metadata` dynamic fields on `Blob` objects to build a db instance that can emulate S3-like functionality. This indexer assumes that the `Metadata` dynamic field can only be created or deleted, and otherwise remains immutable. The resulting tables enable the user to:
-1. upload files to a path,
-   - Additional uploads to the same file path are valid, and are considered newer versions of the same file
-2. retrieve or delete a file at a path,
-   - If a version is provided, that version is retrieved or deleted, otherwise defaults to the latest version.
-3. paginate their files, optionally filtered by path prefix.
+Index `view_count` and `title` attributes from `Metadata` dynamic fields on `Blob` objects to build a db instance that can emulate a blog post platform. Users can:
+- Upload blog posts with titles
+- View their own posts and metrics
+- Delete posts they created
+- Edit post titles
+- Browse posts by other publishers
 
 
 To run the indexer:
@@ -24,7 +24,7 @@ walrus blob-status --blob-id {BLOB_ID}
 # List all blobs for the current address, including expired ones.
 walrus list-blobs --include-expired
 # Set a path: value attribute pair on the Metadata dynamic field of a Blob object on Sui.
-walrus set-blob-attribute {Sui blob object id} --attr "path" {path} --attr "key" {value}
+walrus set-blob-attribute {Sui blob object id} --attr "title" {title} --attr "view_count" {view_count}
 ```
 
 ```sh
@@ -40,15 +40,9 @@ diesel migration run                                                        \
 diesel database reset --database-url=... --migration-dir migrations
 ```
 
-## Walrus Blob Pipeline
+## Blog Post Pipeline
 
-The Walrus Blob Pipeline is a concurrent pipeline that writes the latest state of the `Metadata` dynamic fields to the `walrus_blob` table. It operates on a checkpoint granularity, and upserts records, such that only the final update to an object in a checkpoint is persisted.
-
-On commit, we handle out-of-order writes by using the `address_owner` and `file_path` columns as the primary key, and filtering on the `cp_sequence_number` column to ensure that on constraint violation, we persist the update only if it is newer than the existing row.
-
-## Walrus Blob Historical Pipeline
-
-This pipeline is also a concurrent pipeline, but unlike the Walrus Blob Pipeline, it writes all `Metadata` modifications to the `walrus_blob_historical` table. For some object that was created, mutated, or unwrapped, we can construct the relevant data directly from the output contents of its parent and itself. On the other hand, when an object is deleted or wrapped, it will not have an output version or contents, which complicates the indexing process. To avoid indexing more objects than necessary, we check the object's input state, and if it is a relevant `Metadata` dynamic field, then we write a tombstone record to the table.
+The Blog Post pipeline is a sequential pipeline that writes the latest state of the `Metadata` dynamic fields to the `blog_post` table. It operates on a checkpoint granularity, and upserts records such that only the final update to an object in a checkpoint is persisted.
 
 ## Chain-agnostic Indexer
 
