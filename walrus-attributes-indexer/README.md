@@ -97,29 +97,25 @@ The following uploads the `blog_post.rs` file to Walrus, and runs the indexer lo
 ```
 walrus store blog_post.rs
 
-# Blob ID: qc3Qpe5XP7umQUI1ouKptiQtdIZ6q08Ga6qNIZjYIAs
-# Sui object ID: 0xf245d6321bd5ba4054b9d72db2c7bd1559b676a8bd52feb6bff9aba8ff980685
+# Blob ID: IPYp_WbBwnNRTqeiYtvA6VQ0XUkS6m3ActV-0PIQfjQ
+# Sui object ID: 0xcfb3d474c9a510fde93262d4b7de66cad62a2005a54f31a63e96f3033f465ed3
 
-# Checkpoint 177899028
-walrus set-blob-attribute 0xf245d6321bd5ba4054b9d72db2c7bd1559b676a8bd52feb6bff9aba8ff980685 --attr view_count 5 --attr title "Blog post module"
+# Checkpoint 178907908
+walrus set-blob-attribute 0xcfb3d474c9a510fde93262d4b7de66cad62a2005a54f31a63e96f3033f465ed3 --attr view_count 5 --attr title "Blog post module" --attr blob_id "IPYp_WbBwnNRTqeiYtvA6VQ0XUkS6m3ActV-0PIQfjQ" --attr publisher "0xfe9c7a465f63388e5b95c8fd2db857fad4356fc873f96900f4d8b6e7fc1e760e"
 
-walrus get-blob-attribute 0xf245d6321bd5ba4054b9d72db2c7bd1559b676a8bd52feb6bff9aba8ff980685
+walrus get-blob-attribute 0xcfb3d474c9a510fde93262d4b7de66cad62a2005a54f31a63e96f3033f465ed3
 # Attribute
 # view_count: 5
 # title: Blog post module
+# blob_id: IPYp_WbBwnNRTqeiYtvA6VQ0XUkS6m3ActV-0PIQfjQ
+# publisher: 0xfe9c7a465f63388e5b95c8fd2db857fad4356fc873f96900f4d8b6e7fc1e760e
 ```
 
-Attributes then modified again at 177899471 and 177899535
+Attributes then modified again at 178908405 and 178908459
 
-Run the indexer with `--last-checkpoint` set to before 177899471. When querying the `blog_post` table, you should see:
-`select publisher, replace(replace(rtrim(encode(blob_id, 'base64'), '='), '+', '-'), '/', '_') as blob_id, dynamic_field_id, df_version, view_count, title from blog_post;`
-
-|                             publisher                              |                   blob_id                   |                          dynamic_field_id                          | df_version | view_count |      title       |
-|--------------------------------------------------------------------+---------------------------------------------+--------------------------------------------------------------------+------------+------------+------------------|
-| \xfe9c7a465f63388e5b95c8fd2db857fad4356fc873f96900f4d8b6e7fc1e760e | qc3Qpe5XP7umQUI1ouKptiQtdIZ6q08Ga6qNIZjYIAs | \x1fd611ac738d6341ca42071f1a386946e5ff5278285bc37145263b8ca5bed0f1 |  606102706 |          5 | Blog post module |
-
-Resume the indexer, and run beyond checkpoint 177899535. When querying the `blog_post` table, you should see:
-
-|                             publisher                              |                   blob_id                   |                          dynamic_field_id                          | df_version | view_count |      title       |
-|--------------------------------------------------------------------+---------------------------------------------+--------------------------------------------------------------------+------------+------------+------------------|
-| \xfe9c7a465f63388e5b95c8fd2db857fad4356fc873f96900f4d8b6e7fc1e760e | qc3Qpe5XP7umQUI1ouKptiQtdIZ6q08Ga6qNIZjYIAs | \x1fd611ac738d6341ca42071f1a386946e5ff5278285bc37145263b8ca5bed0f1 |  606102708 |         10 | Blob Post Module |
+You should ultimately see something like:
+```
+                          dynamic_field_id                          | df_version |                             publisher                              |                   blob_id                   | view_count |      title
+--------------------------------------------------------------------+------------+--------------------------------------------------------------------+---------------------------------------------+------------+------------------
+ \x40b5ae12e780ae815d7b0956281291253c02f227657fe2b7a8ccf003a5f597f7 |  608253371 | \xfe9c7a465f63388e5b95c8fd2db857fad4356fc873f96900f4d8b6e7fc1e760e | IPYp_WbBwnNRTqeiYtvA6VQ0XUkS6m3ActV-0PIQfjQ |         10 | Blog Post Module
+ ```
