@@ -1,14 +1,16 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::str::FromStr;
+
 use anyhow::{self, Context};
 use move_core_types::language_storage::StructTag;
 use serde::{Deserialize, Serialize};
-use sui_indexer_alt_framework::types::base_types::ObjectID;
+use sui_indexer_alt_framework::types::base_types::SuiAddress;
 use sui_indexer_alt_framework::types::collection_types::VecMap;
 use sui_indexer_alt_framework::types::dynamic_field::Field;
 use sui_indexer_alt_framework::types::id::UID;
-use sui_indexer_alt_framework::types::object::{Object, Owner};
+use sui_indexer_alt_framework::types::object::Object;
 
 // ============================================================================
 // WALRUS BLOB DESERIALIZATION TYPES
@@ -51,19 +53,19 @@ pub struct BlobAttribute {
     pub metadata: VecMap<String, String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct BlogPostMetadata {
+    pub publisher: Vec<u8>,
+    pub blob_id: String,
+    pub title: String,
+    pub view_count: u64,
+}
+
 /// Try to deserialize the object as a Walrus Metadata dynamic field, and return the
 /// deserialized data and the parent object ID, or return None if it is not.
-pub fn get_metadata(
-    tag: &StructTag,
-    object: &Object,
-) -> anyhow::Result<Option<(BlobAttribute, ObjectID)>> {
+pub fn get_metadata(tag: &StructTag, object: &Object) -> anyhow::Result<Option<BlobAttribute>> {
     // Must be a MoveObject
     let Some(type_) = object.type_() else {
-        return Ok(None);
-    };
-
-    // Dynamic fields must have an ObjectOwner
-    let Owner::ObjectOwner(parent_id) = object.owner() else {
         return Ok(None);
     };
 
@@ -81,29 +83,44 @@ pub fn get_metadata(
     let field: Field<DynamicFieldName, BlobAttribute> =
         bcs::from_bytes(move_object.contents()).context("Failed to deserialize")?;
 
-    Ok(Some((field.value, (*parent_id).into())))
+    Ok(Some(field.value))
 }
 
 /// Extract the title and view_count from the object if it is a walrus metadata dynamic field,
 /// otherwise return None.
-pub fn extract_values_and_parent_id(
+pub fn extract_content_from_metadata(
     tag: &StructTag,
     object: &Object,
-) -> anyhow::Result<Option<((String, u64), ObjectID)>> {
-    let Some((metadata, parent_id)) = get_metadata(tag, object)? else {
+) -> anyhow::Result<Option<BlogPostMetadata>> {
+    let Some(metadata) = get_metadata(tag, object)? else {
         return Ok(None);
     };
 
-    let (Some(title), Some(view_count)) = (
+    let (Some(title), Some(view_count), Some(publisher), Some(blob_id)) = (
         metadata.metadata.get(&"title".to_owned()),
         metadata.metadata.get(&"view_count".to_owned()),
+        metadata.metadata.get(&"publisher".to_owned()),
+        metadata.metadata.get(&"blob_id".to_owned()),
     ) else {
-        return Err(anyhow::anyhow!("Missing title or view_count"));
+        return Err(anyhow::anyhow!(
+            "Missing title, view_count, publisher, or blob_id"
+        ));
     };
 
     let view_count = view_count
         .parse::<u64>()
         .context("Failed to parse view_count")?;
 
-    Ok(Some(((title.to_string(), view_count), parent_id)))
+    let publisher = SuiAddress::from_str(publisher)
+        .context("Failed to parse publisher")?
+        .to_vec();
+
+    let blog_post_metadata = BlogPostMetadata {
+        publisher: publisher,
+        blob_id: blob_id.to_string(),
+        title: title.to_string(),
+        view_count,
+    };
+
+    Ok(Some(blog_post_metadata))
 }

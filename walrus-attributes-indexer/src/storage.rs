@@ -1,7 +1,7 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use diesel::prelude::*;
+use diesel::Insertable;
 use sui_indexer_alt_framework::FieldCount;
 
 use crate::schema::blog_post;
@@ -17,19 +17,17 @@ use crate::schema::blog_post;
 #[derive(Insertable, Debug, FieldCount, Clone)]
 #[diesel(table_name = blog_post)]
 pub struct StoredBlogPost {
+    /// The ID of the Metadata dynamic field.
+    pub dynamic_field_id: Vec<u8>,
+    /// The version of the Metadata dynamic field.
+    pub df_version: i64,
     /// Address that published the Walrus Blob.
     pub publisher: Vec<u8>,
     /// The Blob ID to be used to fetch the Walrus blob. This can be selected in postgres with:
     ///
     /// SELECT replace(replace(rtrim(encode(blob_id, 'base64'), '='), '+', '-'), '/', '_') as
     /// blob_id FROM walrus_blob;
-    pub blob_id: Vec<u8>,
-    /// The ID of the owner of the Blob object that owns the Metadata dynamic field.
-    pub owner_id: Vec<u8>,
-    /// The ID of the Metadata dynamic field.
-    pub dynamic_field_id: Vec<u8>,
-    /// The version of the Metadata dynamic field.
-    pub df_version: i64,
+    pub blob_id: String,
     /// Metadata content, the count of views.
     pub view_count: i64,
     /// Metadata content, the title of the blog post.

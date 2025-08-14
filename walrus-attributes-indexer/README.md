@@ -1,8 +1,10 @@
 # Walrus Attributes Indexer
 
+TODO: Link to custom indexing guide.
+
 ## Quickstart
 
-Index `view_count` and `title` attributes from `Metadata` dynamic fields on `Blob` objects to build a db instance that can emulate a blog post platform. Users can:
+Given a service that allows users to upload blog posts to Walrus such that we store `view_count`, `title`, `publisher` (Sui address that created the Walrus blob), and the `blob_id` of the Walrus blob, we can write a corresponding indexer that commits these attributes to a store of our choice to emulate a blog post platform. Users can:
 - Upload blog posts with titles
 - View their own posts and metrics
 - Delete posts they created

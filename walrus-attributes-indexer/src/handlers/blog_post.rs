@@ -6,9 +6,9 @@ use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 
 use anyhow::{self, bail, Context};
-use diesel::prelude::*;
 use diesel::query_dsl::methods::FilterDsl;
 use diesel::upsert::excluded;
+use diesel::ExpressionMethods;
 use diesel_async::RunQueryDsl;
 use move_core_types::language_storage::StructTag;
 use sui_indexer_alt_framework::pipeline::{sequential::Handler, Processor};
@@ -16,14 +16,14 @@ use sui_indexer_alt_framework::postgres;
 use sui_indexer_alt_framework::types::base_types::{ObjectID, SequenceNumber};
 use sui_indexer_alt_framework::types::effects::TransactionEffectsAPI;
 use sui_indexer_alt_framework::types::full_checkpoint_content::CheckpointData;
-use sui_indexer_alt_framework::types::object::{Object, Owner};
+use sui_indexer_alt_framework::types::object::Object;
 use sui_indexer_alt_framework::types::parse_sui_struct_tag;
 use sui_indexer_alt_framework::FieldCount;
 use sui_indexer_alt_framework::Result;
 
 use crate::schema::blog_post;
 use crate::storage::StoredBlogPost;
-use crate::types::{extract_values_and_parent_id, Blob};
+use crate::types::{extract_content_from_metadata, BlogPostMetadata};
 
 // ============================================================================
 // PROCESSING TYPES
@@ -36,15 +36,11 @@ use crate::types::{extract_values_and_parent_id, Blob};
 #[derive(Debug, Clone)]
 pub enum ProcessedWalrusMetadata {
     Upsert {
-        /// The Blob parent object that owns the Metadata dynamic field. The Object is needed to
-        /// retrieve the Walrus Blob id from its contents.
-        sui_blob_object: Object,
         /// The ID of the Metadata dynamic field.
         dynamic_field_id: ObjectID,
         /// The version of the Metadata dynamic field.
         df_version: u64,
-        view_count: u64,
-        title: String,
+        blog_post_metadata: BlogPostMetadata,
     },
     /// Tracks the deletion of a Metadata dynamic field. When committing, this will delete the
     /// existing row.
@@ -69,7 +65,7 @@ impl Processor for BlogPostPipeline {
         let mut values: BTreeMap<ObjectID, Self::Value> = BTreeMap::new();
 
         // Process relevant Metadata dynamic fields that were wrapped or deleted in this checkpoint.
-        for (object_id, object) in checkpoint_input_objects.iter() {
+        for (object_id, object) in &checkpoint_input_objects {
             // If an object appears in both maps, it is still alive at the end of the checkpoint.
             if latest_live_output_objects.contains_key(object_id) {
                 continue;
@@ -77,7 +73,7 @@ impl Processor for BlogPostPipeline {
 
             // Check the checkpoint input state of the Metadata dynamic field to see if it's
             // relevant to our indexing.
-            let Some((_, _)) = extract_values_and_parent_id(&self.metadata_type, object)? else {
+            let Some(_) = extract_content_from_metadata(&self.metadata_type, object)? else {
                 continue;
             };
 
@@ -86,33 +82,19 @@ impl Processor for BlogPostPipeline {
             values.insert(*object_id, ProcessedWalrusMetadata::Delete(*object_id));
         }
 
-        for (object_id, object) in latest_live_output_objects.iter() {
-            // We only care to emit a record for `Metadata` dynamic fields if they have the "path"
-            // key-value attribute.
-            let Some(((title, view_count), parent_id)) =
-                extract_values_and_parent_id(&self.metadata_type, object)?
+        for (object_id, object) in &latest_live_output_objects {
+            let Some(blog_post_metadata) =
+                extract_content_from_metadata(&self.metadata_type, object)?
             else {
                 continue;
-            };
-
-            // The parent object must also exist: retrieve it for publisher, blob_id, and other
-            // fields for traceability.
-            let Some(parent_object) = latest_live_output_objects.get(&parent_id) else {
-                bail!(
-                    "Parent Blob object {} not found among output objects for Metadata {}",
-                    parent_id,
-                    object_id
-                );
             };
 
             values.insert(
                 *object_id,
                 ProcessedWalrusMetadata::Upsert {
                     df_version: object.version().into(),
-                    sui_blob_object: (*parent_object).clone(),
                     dynamic_field_id: *object_id,
-                    title,
-                    view_count,
+                    blog_post_metadata,
                 },
             );
         }
@@ -149,7 +131,7 @@ impl Handler for BlogPostPipeline {
 
         let to_upsert: Vec<StoredBlogPost> = to_upsert
             .into_iter()
-            .map(|item| item.into_stored())
+            .map(|item| item.to_stored())
             .collect::<Result<Vec<_>>>()?;
 
         let to_delete: Vec<ObjectID> = to_delete
@@ -175,7 +157,6 @@ impl Handler for BlogPostPipeline {
                 .do_update()
                 .set((
                     blog_post::df_version.eq(excluded(blog_post::df_version)),
-                    blog_post::owner_id.eq(excluded(blog_post::owner_id)),
                     blog_post::title.eq(excluded(blog_post::title)),
                     blog_post::blob_id.eq(excluded(blog_post::blob_id)),
                     blog_post::view_count.eq(excluded(blog_post::view_count)),
@@ -213,38 +194,21 @@ impl ProcessedWalrusMetadata {
     }
 
     /// Attempt to convert into a `StoredBlogPost` only if the variant is `Upsert`.
-    fn into_stored(&self) -> Result<StoredBlogPost> {
+    fn to_stored(&self) -> Result<StoredBlogPost> {
         match self {
             ProcessedWalrusMetadata::Upsert {
-                sui_blob_object,
                 dynamic_field_id,
                 df_version,
-                title,
-                view_count,
-            } => {
-                let blob_object: Blob = bcs::from_bytes(
-                    sui_blob_object
-                        .data
-                        .try_as_move()
-                        .ok_or_else(|| anyhow::anyhow!("Parent object is not a Move object"))?
-                        .contents(),
-                )?;
-
-                let Owner::AddressOwner(id) = sui_blob_object.owner() else {
-                    bail!("Parent object's owner is not an address owner");
-                };
-                let publisher = id.to_vec();
-
-                Ok(StoredBlogPost {
-                    publisher,
-                    blob_id: blob_object.blob_id.0.to_vec(),
-                    owner_id: sui_blob_object.id().to_vec(),
-                    dynamic_field_id: dynamic_field_id.to_vec(),
-                    df_version: *df_version as i64,
-                    view_count: *view_count as i64,
-                    title: title.clone(),
-                })
-            }
+                blog_post_metadata,
+            } => Ok(StoredBlogPost {
+                // This is meant to validate that the publisher address stored is a valid SuiAddress
+                publisher: blog_post_metadata.publisher.clone(),
+                blob_id: blog_post_metadata.blob_id.clone(),
+                dynamic_field_id: dynamic_field_id.to_vec(),
+                df_version: *df_version as i64,
+                view_count: blog_post_metadata.view_count as i64,
+                title: blog_post_metadata.title.clone(),
+            }),
             ProcessedWalrusMetadata::Delete(_) => {
                 bail!("Cannot convert Delete variant to StoredBlogPost")
             }
@@ -260,7 +224,7 @@ pub fn checkpoint_input_objects(
 ) -> anyhow::Result<BTreeMap<ObjectID, &Object>> {
     let mut output_objects_seen = HashSet::new();
     let mut checkpoint_input_objects = BTreeMap::new();
-    for tx in checkpoint.transactions.iter() {
+    for tx in &checkpoint.transactions {
         let input_objects_map: BTreeMap<(ObjectID, SequenceNumber), &Object> = tx
             .input_objects
             .iter()
